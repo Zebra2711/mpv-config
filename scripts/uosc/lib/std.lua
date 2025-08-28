@@ -24,34 +24,6 @@ end
 ---@return string
 function trim(str) return str:match('^%s*(.-)%s*$') end
 
----@param str string
----@return string|nil
-function url_encode(str)
-	if str then
-		str = str:gsub('([^%w%-%.%_%~])', function(c)
-			return string.format('%%%02X', string.byte(c))
-		end)
-	end
-	return str
-end
-
--- Escape special characters in url.
----@param str string
----@return string|nil
-function url_decode(str)
-	local function hex_to_char(x)
-		return string.char(tonumber(x, 16))
-	end
-	if str ~= nil then
-		str = str:gsub('^file://', '')
-		str = str:gsub('%%(%x%x)', hex_to_char)
-		if str:find('://localhost:?') then
-			str = str:gsub('^.*/', '')
-		end
-	end
-	return str
-end
-
 -- Trim any `char` from the end of the string.
 ---@param str string
 ---@param char string
@@ -109,6 +81,18 @@ function string_last_index_of(str, sub)
 			if j == sub_length then return i end
 		end
 	end
+end
+
+-- Creates a pattern that matches `str` of any case.
+-- Usage:
+-- ```lua
+-- string.gsub(str, anycase('foo'), 'bar')
+-- ```
+---@param str string
+function anycase(str)
+	return string.gsub(str, '%a', function(c)
+		return string.format('[%s%s]', c:lower(), c:upper())
+	end)
 end
 
 -- Escapes a string to be used in a matching expression.
@@ -298,11 +282,17 @@ function serialize_key_value_list(input, value_sanitizer)
 	return result
 end
 
----@param key string
+---@param key string Key or a combination of a `modifiers+key`. If this includes modifiers, the `modifiers` param is ignored.
 ---@param modifiers? string
 ---@return Shortcut
 function create_shortcut(key, modifiers)
 	key = key:lower()
+
+	local last_plus_in_key = string_last_index_of(key, '+')
+	if last_plus_in_key then
+		modifiers = string.sub(key, 1, last_plus_in_key - 1)
+		key = string.sub(key, last_plus_in_key + 1)
+	end
 
 	local id_parts, modifiers_set
 	if modifiers then

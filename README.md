@@ -23,7 +23,7 @@ PS: When editing the configuration file by yourself, please note that the encodi
 - Personal mpv.net configuration file reference: https://github.com/dyphire/mpv-config/tree/mpvnet
 - Recommended method for browser to call mpv playback
 - [mpv-handler](https://github.com/akiirui/mpv-handler) with script [play-with-mpv](https://greasyfork.org/zh-CN/scripts/416271-play-with-mpv)
-- [Play-With-MPV](https://github.com/LuckyPuppy514/Play-With-MPV)
+- [external-player](https://github.com/LuckyPuppy514/external-player)
 - Single instance mode: [umpv](https://github.com/zhongfly/umpv-go)
 
 ### Script shader description

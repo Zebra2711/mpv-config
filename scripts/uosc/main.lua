@@ -1,5 +1,5 @@
 --[[ uosc | https://github.com/tomasklaen/uosc ]]
-local uosc_version = '5.8.0'
+local uosc_version = '5.11.0'
 
 mp.commandv('script-message', 'uosc-version', uosc_version)
 
@@ -29,7 +29,7 @@ defaults = {
 	timeline_cache = true,
 
 	controls =
-	'menu,gap,subtitles,<has_many_audio>audio,<has_many_video>video,<has_many_edition>editions,<stream>stream-quality,gap,space,speed,space,shuffle,loop-playlist,loop-file,gap,prev,items,next,gap,fullscreen',
+	'menu,gap,<video,audio>subtitles,<has_many_audio>audio,<has_many_video>video,<has_many_edition>editions,<stream>stream-quality,gap,space,<video,audio>speed,space,shuffle,loop-playlist,loop-file,gap,prev,items,next,gap,fullscreen',
 	controls_size = 32,
 	controls_margin = 8,
 	controls_spacing = 2,
@@ -66,7 +66,6 @@ defaults = {
 
 	scale = 1,
 	scale_fullscreen = 1.3,
-	font = '',
 	font_scale = 1,
 	text_border = 1.2,
 	border_radius = 4,
@@ -74,9 +73,6 @@ defaults = {
 	opacity = '',
 	animation_duration = 100,
 	refine = '',
-	pause_on_click_shorter_than = 0, -- deprecated by below
-	click_threshold = 0,
-	click_command = 'cycle pause; script-binding uosc/flash-pause-indicator',
 	flash_duration = 1000,
 	proximity_in = 40,
 	proximity_out = 120,
@@ -105,7 +101,6 @@ defaults = {
 	languages = 'slang,en',
 	subtitles_directory = '~~/subtitles',
 	disable_elements = '',
-	ziggy_path = 'default',
 }
 options = table_copy(defaults)
 function handle_options(changed_options)
@@ -123,10 +118,6 @@ opt.read_options(options, 'uosc', handle_options)
 -- Normalize values
 options.proximity_out = math.max(options.proximity_out, options.proximity_in + 1)
 if options.chapter_ranges:sub(1, 4) == '^op|' then options.chapter_ranges = defaults.chapter_ranges end
-if options.pause_on_click_shorter_than > 0 and options.click_threshold == 0 then
-	msg.warn('`pause_on_click_shorter_than` is deprecated. Use `click_threshold` and `click_command` instead.')
-	options.click_threshold = options.pause_on_click_shorter_than
-end
 if options.total_time and options.destination_time == 'playtime-remaining' then
 	msg.warn('`total_time` is deprecated. Use `destination_time` instead.')
 	options.destination_time = 'total'
@@ -141,6 +132,7 @@ end
 local intl = require('lib/intl')
 t = intl.t
 require('lib/char_conv')
+fzy = require('lib/fzy')
 
 --[[ CONFIG ]]
 local config_defaults = {
@@ -152,6 +144,7 @@ local config_defaults = {
 		curtain = serialize_rgba('111111').color,
 		success = serialize_rgba('a5e075').color,
 		error = serialize_rgba('ff616e').color,
+		match = serialize_rgba('69c5ff').color,
 	},
 	opacity = {
 		timeline = 0.9,
@@ -181,7 +174,7 @@ config = {
 	-- sets max rendering frequency in case the
 	-- native rendering frequency could not be detected
 	render_delay = 1 / 60,
-	font = options.font ~= '' and options.font or mp.get_property('options/osd-font'),
+	font = mp.get_property('options/osd-font'),
 	osd_margin_x = mp.get_property('osd-margin-x'),
 	osd_margin_y = mp.get_property('osd-margin-y'),
 	osd_alignment_x = mp.get_property('osd-align-x'),
@@ -350,6 +343,7 @@ function create_default_menu_items()
 				{title = t('Key bindings'), value = 'script-binding uosc/keybinds'},
 				{title = t('Show in directory'), value = 'script-binding uosc/show-in-directory'},
 				{title = t('Open config folder'), value = 'script-binding uosc/open-config-directory'},
+				{title = t('Update uosc'), value = 'script-binding uosc/update'},
 			},
 		},
 		{title = t('Quit'), value = 'quit'},
@@ -358,7 +352,7 @@ end
 
 --[[ STATE ]]
 
-display = {width = 1280, height = 720, initialized = false}
+display = {ax = 0, ay = 0, bx = 1280, by = 720, width = 1280, height = 720, initialized = false}
 cursor = require('lib/cursor')
 state = {
 	platform = (function()
@@ -375,21 +369,17 @@ state = {
 	cwd = mp.get_property('working-directory'),
 	path = nil, -- current file path or URL
 	history = {}, -- history of last played files stored as full paths
-	title = nil,
-	alt_title = nil,
 	time = nil, -- current media playback time
 	speed = 1,
 	---@type number|nil
 	duration = nil, -- current media duration
+	max_seconds = nil, -- max seconds the time in timeline is expected to reach, accounted for speed
 	time_human = nil, -- current playback time in human format
 	destination_time_human = nil, -- depends on options.destination_time
 	pause = mp.get_property_native('pause'),
-	ime_active = mp.get_property_native("input-ime"),
+	ime_active = mp.get_property_native('input-ime'),
 	chapters = {},
-	---@type {index: number; title: string}|nil
-	current_chapter = nil,
 	chapter_ranges = {},
-	current_clipboard_backend = mp.get_property_native('current-clipboard-backend'),
 	border = mp.get_property_native('border'),
 	title_bar = mp.get_property_native('title-bar'),
 	fullscreen = mp.get_property_native('fullscreen'),
@@ -397,8 +387,8 @@ state = {
 	fullormaxed = mp.get_property_native('fullscreen') or mp.get_property_native('window-maximized'),
 	render_timer = nil,
 	render_last_time = 0,
-	volume = nil,
-	volume_max = nil,
+	volume = mp.get_property_native('volume'),
+	volume_max = mp.get_property_native('volume-max'),
 	mute = nil,
 	type = nil, -- video,image,audio
 	is_idle = false,
@@ -450,9 +440,7 @@ require('lib/menus')
 -- Determine path to ziggy
 do
 	local bin = 'ziggy-' .. (state.platform == 'windows' and 'windows.exe' or state.platform)
-	config.ziggy_path = os.getenv('MPV_UOSC_ZIGGY') or
-	options.ziggy_path == 'default' and join_path(mp.get_script_directory(), join_path('bin', bin)) or
-	utils.join_path(mp.command_native({ 'expand-path', options.ziggy_path }), bin)
+	config.ziggy_path = os.getenv('MPV_UOSC_ZIGGY') or join_path(mp.get_script_directory(), join_path('bin', bin))
 end
 
 --[[ STATE UPDATERS ]]
@@ -462,7 +450,7 @@ function update_display_dimensions()
 	state.radius = round(options.border_radius * state.scale)
 	local real_width, real_height = mp.get_osd_size()
 	if real_width <= 0 then return end
-	display.width, display.height = real_width, real_height
+	display.bx, display.width, display.by, display.height = real_width, real_width, real_height, real_height
 	display.initialized = true
 
 	-- Tell elements about this
@@ -490,20 +478,18 @@ end
 function update_human_times()
 	state.speed = state.speed or 1
 	if state.time then
-		local max_seconds = state.duration
 		if state.duration then
 			if options.destination_time == 'playtime-remaining' then
-				max_seconds = state.speed >= 1 and state.duration or state.duration / state.speed
-				state.destination_time_human = format_time((state.time - state.duration) / state.speed, max_seconds)
+				state.destination_time_human = format_time((state.time - state.duration) / state.speed, state.duration)
 			elseif options.destination_time == 'total' then
-				state.destination_time_human = format_time(state.duration, max_seconds)
+				state.destination_time_human = format_time(state.duration, state.duration)
 			else
-				state.destination_time_human = format_time(state.time - state.duration, max_seconds)
+				state.destination_time_human = format_time(state.time - state.duration, state.duration)
 			end
 		else
 			state.destination_time_human = nil
 		end
-		state.time_human = format_time(state.time, max_seconds)
+		state.time_human = format_time(state.time, state.duration or state.time)
 	else
 		state.time_human, state.destination_time_human = nil, nil
 	end
@@ -632,47 +618,7 @@ function observe_display_fps(name, fps)
 	end
 end
 
-function select_current_chapter()
-	local current_chapter_index = state.current_chapter and state.current_chapter.index
-	local current_chapter
-	if state.time and state.chapters then
-		_, current_chapter = itable_find(state.chapters, function(c) return state.time >= c.time end, #state.chapters, 1)
-	end
-	local new_chapter_index = current_chapter and current_chapter.index
-	if current_chapter_index ~= new_chapter_index then
-		set_state('current_chapter', current_chapter)
-		if itable_has(config.top_bar_flash_on, 'chapter') then
-			Elements:flash({'top_bar'})
-		end
-	end
-end
-
 --[[ STATE HOOKS ]]
-
--- Click detection
-if options.click_threshold > 0 then
-	-- Executes custom command for clicks shorter than `options.click_threshold`
-	-- while filtering out double clicks.
-	local click_time = options.click_threshold / 1000
-	local doubleclick_time = mp.get_property_native('input-doubleclick-time') / 1000
-	local last_down, last_up = 0, 0
-	local click_timer = mp.add_timeout(math.max(click_time, doubleclick_time), function()
-		local delta = last_up - last_down
-		if delta > 0 and delta < click_time and delta > 0.02 then mp.command(options.click_command) end
-	end)
-	click_timer:kill()
-	local function handle_up() last_up = mp.get_time() end
-	local function handle_down()
-		last_down = mp.get_time()
-		if click_timer:is_enabled() then click_timer:kill() else click_timer:resume() end
-	end
-	-- If this function exists, it'll be called at the beginning of render().
-	function setup_click_detection()
-		local hitbox = {ax = 0, ay = 0, bx = display.width, by = display.height, window_drag = true}
-		cursor:zone('primary_down', hitbox, handle_down)
-		cursor:zone('primary_up', hitbox, handle_up)
-	end
-end
 
 mp.register_event('file-loaded', function()
 	local path = normalize_path(mp.get_property_native('path'))
@@ -695,51 +641,6 @@ mp.register_event('end-file', function(event)
 		handle_file_end()
 	end
 end)
--- Top bar titles
-do
-	local function update_state_with_template(prop, template)
-		-- escape ASS, and strip newlines and trailing slashes and trim whitespace
-		local tmp = mp.command_native({'expand-text', template}):gsub('\\n', ' '):gsub('[\\%s]+$', ''):gsub('^%s+', '')
-		set_state(prop, ass_escape(tmp))
-	end
-
-	local function add_template_listener(template, callback)
-		local props = get_expansion_props(template)
-		for prop, _ in pairs(props) do
-			mp.observe_property(prop, 'native', callback)
-		end
-		if not next(props) then callback() end
-	end
-
-	local function remove_template_listener(callback) mp.unobserve_property(callback) end
-
-	-- Main title
-	if #options.top_bar_title > 0 and options.top_bar_title ~= 'no' then
-		if options.top_bar_title == 'yes' then
-			local template = nil
-			local function update_title() update_state_with_template('title', template) end
-			mp.observe_property('title', 'string', function(_, title)
-				remove_template_listener(update_title)
-				template = title
-				if template then
-					if template:sub(-6) == ' - mpv' then template = template:sub(1, -7) end
-					add_template_listener(template, update_title)
-				end
-			end)
-		elseif type(options.top_bar_title) == 'string' then
-			add_template_listener(options.top_bar_title, function()
-				update_state_with_template('title', options.top_bar_title)
-			end)
-		end
-	end
-
-	-- Alt title
-	if #options.top_bar_alt_title > 0 and options.top_bar_alt_title ~= 'no' then
-		add_template_listener(options.top_bar_alt_title, function()
-			update_state_with_template('alt_title', options.top_bar_alt_title)
-		end)
-	end
-end
 mp.observe_property('playback-time', 'number', create_state_setter('time', function()
 	-- Create a file-end event that triggers right before file ends
 	file_end_timer:kill()
@@ -757,7 +658,6 @@ mp.observe_property('playback-time', 'number', create_state_setter('time', funct
 	end
 
 	update_human_times()
-	select_current_chapter()
 end))
 mp.observe_property('rebase-start-time', 'bool', create_state_setter('rebase_start_time', update_duration))
 mp.observe_property('demuxer-start-time', 'number', create_state_setter('start_time', update_duration))
@@ -800,7 +700,6 @@ mp.observe_property('chapter-list', 'native', function(_, chapters)
 	set_state('chapters', chapters)
 	set_state('chapter_ranges', chapter_ranges)
 	set_state('has_chapter', #chapters > 0)
-	select_current_chapter()
 	Elements:trigger('dispositions')
 end)
 mp.observe_property('border', 'bool', create_state_setter('border'))
@@ -819,6 +718,7 @@ mp.observe_property('window-maximized', 'bool', create_state_setter('maximized',
 mp.observe_property('idle-active', 'bool', function(_, idle)
 	set_state('is_idle', idle)
 	Elements:trigger('dispositions')
+	mp.commandv('script-message-to', 'thumbfast', 'clear')
 end)
 mp.observe_property('pause', 'bool', create_state_setter('pause', function() file_end_timer:kill() end))
 mp.observe_property('volume', 'number', create_state_setter('volume'))
@@ -965,13 +865,12 @@ bind_command('playlist', create_self_updating_menu_opener({
 	footnote = t('Paste path or url to add.') .. ' ' .. t('%s to reorder.', 'ctrl+up/down/pgup/pgdn/home/end'),
 	serializer = function(playlist)
 		local items = {}
-		local playlist_titles = mp.get_property_native('user-data/playlistmanager/titles') or {}
+		local force_filename = mp.get_property_native('osd-playlist-entry') == 'filename'
 		for index, item in ipairs(playlist) do
-			local is_url = is_protocol(item.filename)
 			local title = type(item.title) == 'string' and #item.title > 0 and item.title or false
 			items[index] = {
-				title = is_url and (title or playlist_titles[item.filename] or url_decode(item.filename)) or
-				serialize_path(item.filename).basename,
+				title = (not force_filename and title) and title
+					or (is_protocol(item.filename) and item.filename or serialize_path(item.filename).basename),
 				hint = tostring(index),
 				active = item.current,
 				value = index,
@@ -1087,6 +986,14 @@ bind_command('delete-file-quit', function()
 	if state.path and not is_protocol(state.path) then delete_file(state.path) end
 	mp.command('quit')
 end)
+bind_command('menu-prev', function() Elements:maybe('menu', 'navigate_by_items', -1) end)
+bind_command('menu-next', function() Elements:maybe('menu', 'navigate_by_items', 1) end)
+bind_command('menu-prev-page', function() Elements:maybe('menu', 'navigate_by_page', -1) end)
+bind_command('menu-next-page', function() Elements:maybe('menu', 'navigate_by_page', 1) end)
+bind_command('menu-start', function() Elements:maybe('menu', 'navigate_by_items', -math.huge) end)
+bind_command('menu-end', function() Elements:maybe('menu', 'navigate_by_items', math.huge) end)
+bind_command('menu-activate', function() Elements:maybe('menu', 'activate_selected_item') end)
+bind_command('menu-back', function() Elements:maybe('menu', 'back') end)
 bind_command('audio-device', create_self_updating_menu_opener({
 	title = t('Audio devices'),
 	type = 'audio-device-list',
@@ -1160,6 +1067,9 @@ bind_command('open-config-directory', function()
 	else
 		msg.error('Couldn\'t serialize config path "' .. config_path .. '".')
 	end
+end)
+bind_command('update', function()
+	if not Elements:has('updater') then require('elements/Updater'):new() end
 end)
 
 --[[ MESSAGE HANDLERS ]]

@@ -17,7 +17,7 @@ local o = {
     -- OR change to '~~/historybookmarks' for sub path of mpv portable_config directory
     -- OR write any variable using '/:var', such as: '/:var%APPDATA%/mpv/historybookmarks' or '/:var%HOME%/mpv/historybookmarks'
     -- OR specify the absolute path
-    history_dir = "/:dir%mpvconf%/historybookmarks",
+    history_dir = "/:dir%mpvconf%/files/historybookmarks",
     -- specifies the extension of the history-bookmark file
     bookmark_ext = ".mpv.history",
     -- use hash to bookmark_name
@@ -74,13 +74,22 @@ local normalize_path = nil
 local wait_msg
 local on_key = false
 
+local default_history_dir = "/:dir%mpvconf%/files/historybookmarks"
+
 if o.history_dir:find('^/:dir%%mpvconf%%') then
     history_dir = o.history_dir:gsub('/:dir%%mpvconf%%', mp.find_config_file('.'))
 elseif o.history_dir:find('^/:dir%%script%%') then
     history_dir = o.history_dir:gsub('/:dir%%script%%', mp.find_config_file('scripts'))
 elseif o.history_dir:find('/:var%%(.*)%%') then
     local os_variable = o.history_dir:match('/:var%%(.*)%%')
-    history_dir = o.history_dir:gsub('/:var%%(.*)%%', os.getenv(os_variable))
+    local env_value = os.getenv(os_variable)
+    
+    if env_value then
+        history_dir = o.history_dir:gsub('/:var%%(.*)%%', env_value)
+    else
+        msg.warn("env '" .. os_variable .. "' not found. Falling back to default history directory.")
+        history_dir = default_history_dir:gsub('/:dir%%mpvconf%%', mp.find_config_file('.'))
+    end
 else
     history_dir = mp.command_native({ "expand-path", o.history_dir }) -- Expands both ~ and ~~
 end
@@ -544,7 +553,12 @@ local function record()
         return
     else
         pl_name = get_record(bookmark_path)
-        pl_path = utils.join_path(dir, pl_name)
+        if pl_name then
+            pl_path = utils.join_path(dir, pl_name)
+        else
+            pl_name = fname
+            pl_path = path
+        end
     end
 
     if o.use_playlist or pl_count > 1 then

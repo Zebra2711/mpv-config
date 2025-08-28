@@ -12,7 +12,7 @@ local Speed = require('elements/Speed')
 -- scale - `options.controls_size` scale factor.
 -- ratio - Width/height ratio of a static or dynamic element.
 -- ratio_min Min ratio for 'dynamic' sized element.
----@alias ControlItem {element?: Element; kind: string; sizing: 'space' | 'static' | 'dynamic' | 'gap'; scale: number; ratio?: number; ratio_min?: number; hide: boolean; dispositions?: table<string, boolean>}
+---@alias ControlItem {element?: Element; kind: string; sizing: 'space' | 'static' | 'dynamic' | 'gap'; scale: number; ratio?: number; ratio_min?: number; hide: boolean; dispositions?: {[string]: boolean}[]}
 
 ---@class Controls : Element
 local Controls = class(Element)
@@ -37,17 +37,17 @@ function Controls:init_options()
 	-- Serialize control elements
 	local shorthands = {
 		['play-pause'] = 'cycle:pause:pause:no/yes=play_arrow?' .. t('Play/Pause'),
-		menu = 'command:menu_book:script-binding uosc/menu-blurred?' .. t('Menu'),
-		subtitles = 'command:closed_caption:script-binding uosc/subtitles#sub>1?' .. t('Subtitles'),
+		menu = 'command:menu:script-binding uosc/menu-blurred?' .. t('Menu'),
+		subtitles = 'command:subtitles:script-binding uosc/subtitles#sub>0?' .. t('Subtitles'),
 		audio = 'command:graphic_eq:script-binding uosc/audio#audio>1?' .. t('Audio'),
 		['audio-device'] = 'command:speaker:script-binding uosc/audio-device?' .. t('Audio device'),
-		video = 'command:smart_display:script-binding uosc/video#video>1?' .. t('Video'),
-		playlist = 'command:list_alt:script-binding uosc/playlist#playlist>1?' .. t('Playlist'),
-		chapters = 'command:library_books:script-binding uosc/chapters#chapters>1?' .. t('Chapters'),
-		['editions'] = 'command:movie_filter:script-binding uosc/editions#editions>1?' .. t('Editions'),
+		video = 'command:theaters:script-binding uosc/video#video>1?' .. t('Video'),
+		playlist = 'command:list_alt:script-binding uosc/playlist?' .. t('Playlist'),
+		chapters = 'command:bookmark:script-binding uosc/chapters#chapters>0?' .. t('Chapters'),
+		['editions'] = 'command:bookmarks:script-binding uosc/editions#editions>1?' .. t('Editions'),
 		['stream-quality'] = 'command:high_quality:script-binding uosc/stream-quality?' .. t('Stream quality'),
-		['open-file'] = 'command:folder:script-binding uosc/open-file?' .. t('Open file'),
-		['items'] = 'command:list_alt:script-binding uosc/items#playlist>1?' .. t('Playlist/Files'),
+		['open-file'] = 'command:file_open:script-binding uosc/open-file?' .. t('Open file'),
+		['items'] = 'command:list_alt:script-binding uosc/items?' .. t('Playlist/Files'),
 		prev = 'command:arrow_back_ios:script-binding uosc/prev?' .. t('Previous'),
 		next = 'command:arrow_forward_ios:script-binding uosc/next?' .. t('Next'),
 		first = 'command:first_page:script-binding uosc/first?' .. t('First'),
@@ -93,15 +93,27 @@ function Controls:init_options()
 		local parts = split(config, ' *: *')
 		local kind, params = parts[1], itable_slice(parts, 2)
 
-		-- Serialize dispositions
+		-- Serialize dispositions into OR groups of AND conditions
+		---@type {[string]: boolean}[]
 		local dispositions = {}
-		for _, definition in ipairs(comma_split(item.disposition)) do
-			if #definition > 0 then
-				local value = definition:sub(1, 1) ~= '!'
-				local name = not value and definition:sub(2) or definition
-				local prop = name:sub(1, 4) == 'has_' and name or 'is_' .. name
-				dispositions[prop] = value
+		---@type string[]
+		local disposition_props = {}
+		for _, or_group in ipairs(comma_split(item.disposition)) do
+			local group = {}
+			for _, condition in ipairs(split(or_group, ' *+ *')) do
+				if #condition > 0 then
+					local value = condition:sub(1, 1) ~= '!'
+					local name = not value and condition:sub(2) or condition
+					if name:sub(1, 4) == 'has_' or itable_has({'idle', 'image', 'audio', 'video', 'stream'}, name) then
+						local prop = name:sub(1, 4) == 'has_' and name or 'is_' .. name
+						group[prop] = value
+					else
+						disposition_props[#disposition_props + 1] = name
+						group[name] = value
+					end
+				end
 			end
+			dispositions[#dispositions + 1] = group
 		end
 
 		-- Convert toggles into cycles
@@ -175,6 +187,7 @@ function Controls:init_options()
 					name = params[1],
 					render_order = self.render_order,
 					anchor_id = 'controls',
+					on_hide = function() self:reflow() end,
 				})
 				table_assign(control, {element = element, sizing = 'static', scale = 1, ratio = 1})
 			end
@@ -193,6 +206,11 @@ function Controls:init_options()
 			break
 		end
 
+		if control.element then
+			for _, prop in ipairs(disposition_props) do
+				control.element:observe_mp_property(prop, function() self:reflow() end)
+			end
+		end
 		self.controls[#self.controls + 1] = control
 	end
 
@@ -200,18 +218,39 @@ function Controls:init_options()
 end
 
 function Controls:reflow()
-	-- Populate the layout only with items that match current disposition
+	-- Populate the layout only with items that are not hidden and match current disposition
 	self.layout = {}
 	for _, control in ipairs(self.controls) do
-		local matches = true
-		for prop, value in pairs(control.dispositions) do
-			if state[prop] ~= value then
-				matches = false
+		local matches = false
+		local conditions_num = 0
+
+		-- Check against OR groups of AND conditions
+		for _, group in pairs(control.dispositions) do
+			local group_matches = true
+			for prop, value in pairs(group) do
+				conditions_num = conditions_num + 1
+				---@type boolean
+				local current_value
+				if prop:sub(1, 4) == 'has_' or prop:sub(1, 3) == 'is_' then
+					current_value = state[prop]
+				else
+					current_value = mp.get_property_bool(prop, false)
+				end
+				if current_value ~= value then
+					group_matches = false
+					break
+				end
+			end
+			if group_matches then
+				matches = true
 				break
 			end
 		end
-		if control.element then control.element.enabled = matches end
-		if matches then self.layout[#self.layout + 1] = control end
+
+		if conditions_num == 0 then matches = true end
+		local show = matches and (not control.element or control.element.hide ~= true)
+		if control.element then control.element.enabled = show end
+		if show then self.layout[#self.layout + 1] = control end
 	end
 
 	self:update_dimensions()
@@ -232,9 +271,6 @@ function Controls:register_badge_updater(badge, element)
 			for _, track in ipairs(value) do if track.type == prop then count = count + 1 end end
 			return count
 		end
-	elseif prop == 'playlist' then
-		observable_name = 'playlist-count'
-		serializer = function(count) return count end
 	else
 		local parts = split(prop, '@')
 		-- Support both new `prop@owner` and old `@prop` syntaxes
@@ -253,7 +289,7 @@ function Controls:register_badge_updater(badge, element)
 	if is_external_prop then
 		element['on_external_prop_' .. prop] = function(_, value) handler(prop, value) end
 	else
-		self:observe_mp_property(observable_name, handler)
+		element:observe_mp_property(observable_name, handler)
 	end
 end
 

@@ -1,15 +1,15 @@
 --[[
-SOURCE_ https://github.com/sibwaf/mpv-scripts/blob/master/fuzzydir.lua
-COMMIT_26 Mar 2023_2ba3e26
-	Allows using "**" wildcards in sub-file-paths and audio-file-paths
+    fuzzydir / by sibwaf / https://github.com/sibwaf/mpv-scripts
+
+    Allows using "**" wildcards in sub-file-paths and audio-file-paths
     so you don't have to specify all the possible directory names.
 
     Basically, allows you to do this and never have the need to edit any paths ever again:
     audio-file-paths = **
     sub-file-paths = **
 
-	MIT license - do whatever you want, but I'm not responsible for any possible problems.
-	Please keep the URL to the original repository. Thanks!
+    MIT license - do whatever you want, but I'm not responsible for any possible problems.
+    Please keep the URL to the original repository. Thanks!
 ]]
 
 --[[
@@ -20,7 +20,7 @@ COMMIT_26 Mar 2023_2ba3e26
     Determines whether the script is enabled or not
 
     # max_search_depth
-    
+
     Determines the max depth of recursive search, should be >= 1
 
     Examples for "sub-file-paths = **":
@@ -29,7 +29,7 @@ COMMIT_26 Mar 2023_2ba3e26
 
     Please be careful when setting this value too high as it can result in awful performance or even stack overflow
 
-    
+
     # discovery_threshold
 
     fuzzydir will skip paths which contain more than discovery_threshold directories in them
@@ -42,12 +42,12 @@ COMMIT_26 Mar 2023_2ba3e26
 
     Use 0 to disable this behavior completely
 
-    # excluded_dir
 
-    fuzzydir will ignore paths which in excluded_dir
+    # use_powershell
 
-    This supports absolute and relative paths
-    example on Windows: ["Z:", "Z:/Cloud/", "/Cloud/"]
+    fuzzydir will use PowerShell to traverse directories when it's available
+
+    Can be faster in some cases, but can also be significantly slower
 ]]
 
 local msg = require 'mp.msg'
@@ -56,17 +56,13 @@ local options = require 'mp.options'
 
 o = {
     enabled = true,
-    max_search_depth = 1,
+    max_search_depth = 3,
     discovery_threshold = 10,
-    excluded_dir = [[
-        []
-    ]],
+    use_powershell = false,
 }
 options.read_options(o, _, function() end)
 
 ----------
-local is_windows = package.config:sub(1, 1) == "\\" -- detect path separator, windows uses backslashes
-excluded_dir = utils.parse_json(o.excluded_dir)
 
 local default_audio_paths = mp.get_property_native("options/audio-file-paths")
 local default_sub_paths = mp.get_property_native("options/sub-file-paths")
@@ -75,19 +71,6 @@ function foreach(list, action)
     for _, item in pairs(list) do
         action(item)
     end
-end
-
-function is_protocol(path)
-    return type(path) == 'string' and path:find('^%a[%a%d-_]+://') ~= nil
-end
-
-function need_ignore(tab, val)
-    for index, element in ipairs(tab) do
-        if string.find(val, element) then
-            return true
-        end
-    end
-    return false
 end
 
 function starts_with(str, prefix)
@@ -162,12 +145,15 @@ end
 
 -- Platform-dependent optimization
 
-local powershell_version = call_command({
-    "powershell",
-    "-NoProfile",
-    "-Command",
-    "$Host.Version.Major",
-})
+local powershell_version = nil
+if o.use_powershell then
+    powershell_version = call_command({
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        "$Host.Version.Major",
+    })
+end
 if powershell_version ~= nil then
     powershell_version = tonumber(powershell_version[1])
 end
@@ -177,30 +163,28 @@ end
 msg.debug("PowerShell version", powershell_version)
 
 function fast_readdir(path)
-    local is_windows = package.config:sub(1,1) == "\\"
-    if is_windows then
-        if powershell_version >= 3 then
-            msg.trace("Scanning", path, "with PowerShell")
-            return call_command({
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                [[
-                $dirs = Get-ChildItem -LiteralPath ]] .. string.format("%q", path) .. [[ -Directory
-                foreach($dir in $dirs) {
-                    $u8clip = [System.Text.Encoding]::UTF8.GetBytes($dir.Name)
-                    [Console]::OpenStandardOutput().Write($u8clip, 0, $u8clip.Length)
-                    Write-Host ""
-                } ]],
-            })
-        else
-            msg.trace("Scanning", path, "with default readdir")
-            return utils.readdir(path, "dirs")
-        end
-    else
-        msg.trace("Scanning", path, "with ls")
-        return call_command({ "ls", "-1", "-d", path })
+    if powershell_version >= 3 then
+        msg.trace("Scanning", path, "with PowerShell")
+        result = call_command({
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            [[
+            $dirs = Get-ChildItem -LiteralPath ]] .. string.format("%q", path) .. [[ -Directory
+            foreach($dir in $dirs) {
+                $u8clip = [System.Text.Encoding]::UTF8.GetBytes($dir.Name)
+                [Console]::OpenStandardOutput().Write($u8clip, 0, $u8clip.Length)
+                Write-Host ""
+            } ]],
+        })
+        msg.trace("Finished scanning", path, "with PowerShell")
+        return result
     end
+
+    msg.trace("Scanning", path, "with default readdir")
+    result = utils.readdir(path, "dirs")
+    msg.trace("Finished scanning", path, "with default readdir")
+    return result
 end
 
 -- Platform-dependent optimization end
@@ -257,9 +241,6 @@ function explode(raw_paths, search_path, cache)
 
     local normalized = {}
     for index, path in pairs(result) do
-        if is_windows then
-            path = path:lower()
-        end
         local normalized_path = normalize(path)
         if not contains(normalized, normalized_path) and normalized_path ~= "" then
             table.insert(normalized, normalized_path)
@@ -275,23 +256,25 @@ function explode_all()
 
     local video_path = mp.get_property("path")
     local search_path, _ = utils.split_path(video_path)
-    if is_windows then search_path = search_path:gsub("\\", "/") end
     msg.debug("search_path = " .. search_path)
 
     local cache = {}
-    if is_protocol(video_path) or need_ignore(excluded_dir, search_path) then
-        return
-    end
 
     foreach(default_audio_paths, function(it) msg.debug("audio-file-paths:", it) end)
     local audio_paths = explode(default_audio_paths, search_path, cache)
     foreach(audio_paths, function(it) msg.debug("Adding to audio-file-paths:", it) end)
     mp.set_property_native("options/audio-file-paths", audio_paths)
 
+    msg.verbose("Done expanding audio-file-paths")
+
     foreach(default_sub_paths, function(it) msg.debug("sub-file-paths:", it) end)
     local sub_paths = explode(default_sub_paths, search_path, cache)
     foreach(sub_paths, function(it) msg.debug("Adding to sub-file-paths:", it) end)
     mp.set_property_native("options/sub-file-paths", sub_paths)
+
+    msg.verbose("Done expanding sub-file-paths")
+
+    msg.debug("Done expanding paths")
 end
 
 mp.add_hook("on_load", 50, explode_all)
